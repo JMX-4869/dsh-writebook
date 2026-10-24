@@ -1,0 +1,6 @@
+# 写书 bundle：Host 半边开 /writebook-api，Client 半边注册侧边栏图标 + 主面板。
+# 根目录默认是「当前会话默认工作区 + /books」；要指别处就在 config 里写 root。
+- insert:
+    - id: writebook
+      name: '@local/writebook'
+      config: {}
