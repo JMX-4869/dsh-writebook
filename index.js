@@ -481,6 +481,53 @@ function chapterContext(root, dir, rel) {
 
 
 
+// ─── 开工前取材料 ───────────────────────────────────────────
+// 两条触发线，先到先算：
+// ① **每章** —— 每次写新章都来取材料（前情 + 本章伏笔），很轻；
+// ② **每几次对话** —— 每 3 次开工（= 3 段写书对话）强制重读一次全书设定，
+//    因为设定文件合起来 2.5–3 万 token，读它比写一章还贵，不能每章都读。
+// 另外隔了 12 小时或跨了 3 章也补一次，防止长期不开工。
+
+const REREAD_CALLS = 3
+const REREAD_CHAPTERS = 3
+const REREAD_HOURS = 12
+
+function bookBrief(root, dir, n) {
+  const bookDir = path.join(root, dir)
+  const chapters = listChapters(bookDir)
+  if (!chapters.length) throw Object.assign(new Error('这本书还没有正文'), { status: 404 })
+  const wanted = chapters.find((c) => c.n === Number(n)) || chapters[chapters.length - 1]
+  const ctx = chapterContext(root, dir, wanted.path)
+  const state = readState(root)
+  const now = Date.now()
+  const briefs = (typeof state.briefCount === 'number' ? state.briefCount : 0) + 1
+  const hours = typeof state.lastBriefAt === 'number' ? Math.max(0, Math.round((now - state.lastBriefAt) / 3600e3)) : null
+  const chaptersSince =
+    typeof state.lastBriefChapter === 'number' ? Math.max(0, wanted.n - state.lastBriefChapter) : null
+  // 第 1、4、7… 次开工读全书设定；其余只取轻材料。
+  const byCalls = briefs % REREAD_CALLS === 1
+  const adviseFullRead =
+    byCalls || hours === null || hours >= REREAD_HOURS || (chaptersSince !== null && chaptersSince >= REREAD_CHAPTERS)
+  writeState(root, { lastBriefAt: now, lastBriefChapter: wanted.n, briefCount: briefs })
+  return {
+    book: dir,
+    chapter: { n: wanted.n, title: wanted.title, chars: wanted.chars },
+    prev: ctx.prev,
+    issues: ctx.issues,
+    degraded: ctx.degraded,
+    since: { hours, chaptersSince, briefs },
+    adviseFullRead,
+    reason: byCalls
+      ? `第 ${briefs} 次开工（每 ${REREAD_CALLS} 次读一次全书设定）`
+      : hours !== null && hours >= REREAD_HOURS
+        ? `隔了 ${hours} 小时没开工`
+        : chaptersSince !== null && chaptersSince >= REREAD_CHAPTERS
+          ? `跨了 ${chaptersSince} 章`
+          : '',
+    fullReadFiles: adviseFullRead ? ['01_世界观.md', '02_人物.md', '07_时间线.md'] : [],
+  }
+}
+
 // ─── 现在写的是哪本 ─────────────────────────────────────────
 // 落盘在工作区根的 .writebook.json 里（不在任何一本书里）。
 // 面板用它高亮书架，agent 用 writebook 工具读它 —— 同一个值，两边不会打架。
@@ -787,10 +834,13 @@ export function apply(ctx, config) {
       description:
         '写小说项目：当前是哪本书、写到哪一章、有哪些设定文件。' +
         '**接到写书、改章节、查设定、续写这类任务时，先调一次 action=current**，别猜是哪本。' +
+        '**要动笔写新的一章之前，先调 action=brief（可带 n=章号）**：它返回上一章结尾、这一章该埋/该收的伏笔，' +
+        '并告诉你距上次开工过了多少小时、期间写了几章 —— 到点会提示该重读 01 世界观 / 02 人物 / 07 时间线。' +
         'action=list 列出全部书；action=set 切换当前书（book 传 books/ 下的文件夹名）。' +
         '数据来自 books/ 目录，和写书面板是同一份。',
       parameters: {
-        action: { type: 'string', description: 'current（默认）/ list / set' },
+        action: { type: 'string', description: 'current（默认）/ list / set / brief' },
+        n: { type: 'number', description: 'action=brief 时的章号；省略就用最后一章（按章号找，找不到取最新）' },
         book: { type: 'string', description: 'action=set 时的书名（books/ 下的文件夹名）' },
       },
       output: {
@@ -832,6 +882,33 @@ export function apply(ctx, config) {
               books
                 .map((b) => `${b.dir === current ? '→ ' : '  '}${b.dir}（${b.chapters} 章 / ${b.chars} 字）`)
                 .join('\n') || '（书架是空的）',
+          }
+        }
+
+        if (action === 'brief') {
+          const bookDirName = String((args && args.book) || state.current || (books[0] && books[0].dir) || '')
+          const book = books.find((b) => b.dir === bookDirName || b.title === bookDirName)
+          if (!book) return { ok: false, message: `没有这本书：${bookDirName || '（空）'}` }
+          const info = bookBrief(root, book.dir, args && args.n)
+          return {
+            ok: true,
+            ...info,
+            message: [
+              `《${book.title}》· ${info.chapter.title || `第 ${info.chapter.n} 章`}（${info.chapter.chars} 字）`,
+              info.since.hours === null
+                ? `第 ${info.since.briefs} 次开工取材料`
+                : `第 ${info.since.briefs} 次开工 · 距上次 ${info.since.hours} 小时 · 期间写了 ${info.since.chaptersSince ?? 0} 章`,
+              info.prev ? `前情：${info.prev.title}，结尾 ${info.prev.tail.slice(-80)}` : '没有前一章',
+              info.issues.length
+                ? '伏笔：' + info.issues.map((i) => `${i.kind} ${i.name}`).join('；')
+                : '伏笔：本章没有要埋或要收的',
+              info.adviseFullRead
+                ? `⚠️ 该重读设定（${info.reason || '到点了'}）：${info.fullReadFiles.join('、')}`
+                : '不用重读全书设定，这次只取轻材料',
+              info.degraded.length ? `缺口：${info.degraded.join('；')}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
           }
         }
 
