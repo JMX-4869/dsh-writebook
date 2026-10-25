@@ -717,7 +717,7 @@ function chapterStyle(raw, names = []) {
   const ju = (text.match(/。/g) || []).length
   const sents = text.split(/(?<=[。！？…])/).map((s) => s.trim()).filter((s) => s.length > 1)
   const startsName = names.length ? paras.filter((p) => names.some((name) => p.startsWith(name))).length : -1
-  const smell = (text.match(/闻|鼻子|腥|臭|香|馊|霉|气味|烟味|糊味|土腥/g) || []).length
+  const smell = (text.match(/闻|鼻子|腥|臭|香|馊|霉|气味|烟味|糊味|土腥|苦味|锈味|汗味|臊|呛鼻/g) || []).length
   const juPer1000 = han ? Math.round((ju / han) * 1000 * 10) / 10 : 0
   const avgSentLen = sents.length ? Math.round((han / sents.length) * 10) / 10 : 0
   const nameStartRatio = startsName < 0 || !paras.length ? -1 : Math.round((startsName / paras.length) * 100)
