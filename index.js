@@ -483,14 +483,52 @@ function chapterContext(root, dir, rel) {
 
 // ─── 开工前取材料 ───────────────────────────────────────────
 // 两条触发线，先到先算：
-// ① **每章** —— 每次写新章都来取材料（前情 + 本章伏笔），很轻；
-// ② **每几次对话** —— 每 3 次开工（= 3 段写书对话）强制重读一次全书设定，
-//    因为设定文件合起来 2.5–3 万 token，读它比写一章还贵，不能每章都读。
+// ① **每章** —— 每次写新章都来取材料（前情 + 本章伏笔 + **成长曲线里这一章的位置**），很轻；
+// ② **每几次对话** —— 每 3 次开工（= 3 段写书对话）强制重读一次全书设定。
+// 设定九万字节 ≈ 2.5–3 万 token，读它比写一章还贵，不能每章都读。
 // 另外隔了 12 小时或跨了 3 章也补一次，防止长期不开工。
 
 const REREAD_CALLS = 3
 const REREAD_CHAPTERS = 3
 const REREAD_HOURS = 12
+
+/** 04_大纲 里「成长曲线」那张表：这一章落在哪个跃升段、下一段是什么。 */
+function outlinePosition(bookDir, n) {
+  const file = path.join(bookDir, '04_大纲.md')
+  if (!fs.existsSync(file)) return null
+  let text
+  try {
+    text = fs.readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+  const points = []
+  let inCurve = false
+  for (const line of text.split('\n')) {
+    if (/^###\s*成长曲线/.test(line)) {
+      inCurve = true
+      continue
+    }
+    if (inCurve && /^#{1,3}\s/.test(line)) break
+    if (!inCurve || !line.trim().startsWith('|')) continue
+    const cells = line.split('|').map((s) => s.trim())
+    if (cells.length < 4 || !/^\d/.test(cells[1])) continue
+    const hit = cells[1].match(/(\d+)(?:\s*-\s*(\d+))?/)
+    if (!hit) continue
+    const from = Number(hit[1])
+    const to = hit[2] ? Number(hit[2]) : from
+    points.push({ from, to, text: cells[2] })
+  }
+  if (!points.length) return null
+  const reached = [...points].reverse().find((p) => p.to <= n) || null
+  const next = points.find((p) => p.from > n) || null
+  return {
+    reached: reached ? reached.text : '',
+    reachedRange: reached ? (reached.from === reached.to ? `第 ${reached.from} 章` : `第 ${reached.from}–${reached.to} 章`) : '',
+    next: next ? next.text : '',
+    nextAt: next ? next.from : null,
+  }
+}
 
 function bookBrief(root, dir, n) {
   const bookDir = path.join(root, dir)
@@ -498,6 +536,7 @@ function bookBrief(root, dir, n) {
   if (!chapters.length) throw Object.assign(new Error('这本书还没有正文'), { status: 404 })
   const wanted = chapters.find((c) => c.n === Number(n)) || chapters[chapters.length - 1]
   const ctx = chapterContext(root, dir, wanted.path)
+  const outline = outlinePosition(bookDir, wanted.n)
   const state = readState(root)
   const now = Date.now()
   const briefs = (typeof state.briefCount === 'number' ? state.briefCount : 0) + 1
@@ -514,6 +553,7 @@ function bookBrief(root, dir, n) {
     chapter: { n: wanted.n, title: wanted.title, chars: wanted.chars },
     prev: ctx.prev,
     issues: ctx.issues,
+    outline,
     degraded: ctx.degraded,
     since: { hours, chaptersSince, briefs },
     adviseFullRead,
@@ -524,7 +564,10 @@ function bookBrief(root, dir, n) {
         : chaptersSince !== null && chaptersSince >= REREAD_CHAPTERS
           ? `跨了 ${chaptersSince} 章`
           : '',
-    fullReadFiles: adviseFullRead ? ['01_世界观.md', '02_人物.md', '07_时间线.md'] : [],
+    // 规矩（03 写作手册）和坑（08 检查表）跟设定一样重要 —— 之前漏了它们。
+    fullReadFiles: adviseFullRead
+      ? ['01_世界观.md', '02_人物.md', '03_写作手册.md', '07_时间线.md', '08_写作检查表.md']
+      : [],
   }
 }
 
@@ -899,6 +942,12 @@ export function apply(ctx, config) {
                 ? `第 ${info.since.briefs} 次开工取材料`
                 : `第 ${info.since.briefs} 次开工 · 距上次 ${info.since.hours} 小时 · 期间写了 ${info.since.chaptersSince ?? 0} 章`,
               info.prev ? `前情：${info.prev.title}，结尾 ${info.prev.tail.slice(-80)}` : '没有前一章',
+              info.outline && info.outline.reached
+                ? `进度：已到「${info.outline.reached}」（${info.outline.reachedRange}）` +
+                  (info.outline.next ? ` · 下一个跃升点：第 ${info.outline.nextAt} 章「${info.outline.next}」` : '')
+                : info.outline && info.outline.next
+                  ? `进度：还没到第一个跃升点 · 第一个是第 ${info.outline.nextAt} 章「${info.outline.next}」`
+                  : '',
               info.issues.length
                 ? '伏笔：' + info.issues.map((i) => `${i.kind} ${i.name}`).join('；')
                 : '伏笔：本章没有要埋或要收的',
