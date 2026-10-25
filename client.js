@@ -378,6 +378,11 @@ window.__ModuleLoader__.load({
             { type: 'button', className: 'wb-tab' + (tab === 'settings' ? ' on' : ''), onClick: () => setTab('settings') },
             `设定 ${settings.length}`,
           ),
+          h(
+            'button',
+            { type: 'button', className: 'wb-tab' + (tab === 'insight' ? ' on' : ''), onClick: () => setTab('insight') },
+            '体检',
+          ),
         ),
         h(
           'div',
@@ -470,8 +475,119 @@ window.__ModuleLoader__.load({
                   ),
                   settings.length === 0 && h('div', { className: 'wb-empty' }, '这本书还没有设定文件。'),
                 ),
+              tab === 'insight' && h(InsightPane, { dir, onErr: setErr }),
             ),
         ),
+      )
+    }
+
+    // ─── 全书体检（人物没丢 / 时间没倒） ─────────────────────
+    function InsightPane({ dir, onErr }) {
+      const [data, setData] = useState(null)
+
+      const load = useCallback(async () => {
+        try {
+          setData(await api(`/insight?dir=${encodeURIComponent(dir)}`))
+        } catch (error) {
+          onErr(error.message)
+        }
+      }, [dir, onErr])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      const rows = (data && data.rows) || []
+      const absences = (data && data.absences) || []
+      const timeIssues = (data && data.timeIssues) || []
+      const counts = new Map()
+      for (const row of rows) {
+        for (const name of row.present) counts.set(name, (counts.get(name) || 0) + 1)
+      }
+
+      return h(
+        React.Fragment,
+        null,
+        h(
+          'div',
+          { className: 'wb-form' },
+          btn('刷新', load, { ghost: true }),
+          data
+            ? h(
+                'span',
+                { className: 'sub', style: { fontSize: 11 } },
+                `${data.summary.chapters} 章 · ${data.summary.characters} 人 · 缺席告警 ${data.summary.absentWarnings} · 时间告警 ${data.summary.timeWarnings}`,
+              )
+            : null,
+        ),
+        data === null && h('div', { className: 'wb-loading' }, '加载中…'),
+        data &&
+          data.degraded.length > 0 &&
+          h(
+            'div',
+            { className: 'wb-ctx-row', style: { marginBottom: 12 } },
+            h('span', { className: 'k' }, '缺口'),
+            h(
+              'span',
+              { className: 'v', style: { color: 'var(--dsw-alias-state-warn-primary)' } },
+              data.degraded.join('；'),
+            ),
+          ),
+        data &&
+          h(
+            'div',
+            { style: { marginBottom: 18 } },
+            h('div', { className: 'sub', style: { fontSize: 11, marginBottom: 8 } }, '人物出场'),
+            data.characters.map((name) => {
+              const gone = absences.filter((a) => a.name === name)
+              return h(
+                'div',
+                { className: 'wb-ctx-row', key: name },
+                h('span', { className: 'k', style: { minWidth: 72 } }, name),
+                h(
+                  'span',
+                  { className: 'v' },
+                  `${counts.get(name) || 0} / ${rows.length} 章` +
+                    (gone.length
+                      ? ' · 连续缺席 ' +
+                        gone.map((a) => `第 ${a.from}–${a.to} 章（${a.length} 章）`).join('、')
+                      : ''),
+                ),
+              )
+            }),
+            data.characters.length === 0 && h('div', { className: 'wb-empty' }, '没解析出人物名。'),
+          ),
+        data &&
+          h(
+            'div',
+            null,
+            h('div', { className: 'sub', style: { fontSize: 11, marginBottom: 8 } }, '书内时间'),
+            data.timeline.length > 0
+              ? h(
+                  'div',
+                  { className: 'wb-ctx-row' },
+                  h('span', { className: 'k' }, '天'),
+                  h(
+                    'span',
+                    { className: 'v' },
+                    data.timeline.map((t) => `第${t.n}章=${t.day}天`).join(' → '),
+                  ),
+                )
+              : h('div', { className: 'wb-empty' }, '正文里没有「第 N 天」。'),
+            timeIssues.length > 0 &&
+              h(
+                'div',
+                { className: 'wb-ctx-row' },
+                h('span', { className: 'k' }, '倒挂'),
+                h(
+                  'span',
+                  { className: 'v', style: { color: 'var(--dsw-alias-state-error-primary)' } },
+                  timeIssues
+                    .map((i) => `第 ${i.n} 章是第 ${i.day} 天，比第 ${i.prevN} 章（第 ${i.prevDay} 天）早`)
+                    .join('；'),
+                ),
+              ),
+          ),
       )
     }
 
@@ -837,7 +953,9 @@ window.__ModuleLoader__.load({
                     React.Fragment,
                     null,
                     ctx &&
-                      (ctx.prev || (ctx.issues && ctx.issues.length > 0)) &&
+                      (ctx.prev ||
+                        (ctx.issues && ctx.issues.length > 0) ||
+                        (ctx.degraded && ctx.degraded.length > 0)) &&
                       h(
                         'div',
                         { className: 'wb-ctx' },
@@ -846,14 +964,28 @@ window.__ModuleLoader__.load({
                             'div',
                             { className: 'wb-ctx-row' },
                             h('span', { className: 'k' }, '前情'),
-                            h('span', { className: 'v' }, `${ctx.prev.title} 结尾 —— ${ctx.prev.tail.slice(-150)}`),
+                            h(
+                              'span',
+                              { className: 'v', title: ctx.prev.tail },
+                              `${ctx.prev.title}（${ctx.prev.chars} 字）${ctx.prev.scope} —— ${ctx.prev.tail.slice(-150)}`,
+                            ),
                           ),
                         ctx.issues && ctx.issues.length > 0
                           ? h(
                               'div',
                               { className: 'wb-ctx-row' },
                               h('span', { className: 'k' }, '这一章'),
-                              h('span', { className: 'v' }, ctx.issues.map((i) => `${i.kind} ${i.name}`).join('；')),
+                              h(
+                                'span',
+                                { className: 'v' },
+                                ctx.issues
+                                  .map((i) =>
+                                    i.kind === '收' && i.span !== null
+                                      ? `收 ${i.name}（埋在第 ${i.buriedAt} 章，隔了 ${i.span} 章）`
+                                      : `${i.kind} ${i.name}`,
+                                  )
+                                  .join('；'),
+                              ),
                             )
                           : h(
                               'div',
@@ -861,6 +993,18 @@ window.__ModuleLoader__.load({
                               h('span', { className: 'k' }, '这一章'),
                               h('span', { className: 'v' }, '伏笔表里没有要埋或要收的'),
                             ),
+                        ctx.degraded && ctx.degraded.length > 0
+                          ? h(
+                              'div',
+                              { className: 'wb-ctx-row' },
+                              h('span', { className: 'k' }, '缺口'),
+                              h(
+                                'span',
+                                { className: 'v', style: { color: 'var(--dsw-alias-state-warn-primary)' } },
+                                ctx.degraded.join('；'),
+                              ),
+                            )
+                          : null,
                       ),
                     h('article', { className: 'wb-prose' }, body.trim() || '（空）'),
                   ),

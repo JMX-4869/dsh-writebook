@@ -392,7 +392,11 @@ function appendInbox(root, line) {
 
 // ─── 这一章之前该看什么 ─────────────────────────────────────
 // 长程崩不是「忘了怎么写」，是**早期埋的东西到后面没人翻**。所以把三样
-// 自动捞到正文旁边：上一章结尾、这一章该埋/该收的伏笔、检查表头几条。
+// 自动捞到正文旁边：上一章结尾、这一章该埋/该收的伏笔、缺了什么也说出来。
+//
+// 两个跟 siweina/dsh-novel-writer 学的点：
+// ① 伏笔带上「埋了多久」—— 没有这个数，看不出「该收了」；
+// ② 取不到的材料要**明说**（他们的 degraded 数组），别静默给个空。
 
 function chapterContext(root, dir, rel) {
   const bookDir = path.join(root, dir)
@@ -400,6 +404,7 @@ function chapterContext(root, dir, rel) {
   const index = chapters.findIndex((c) => c.path === rel)
   const current = index >= 0 ? chapters[index] : null
   const n = current ? current.n : 0
+  const degraded = []
 
   let prev = null
   if (index > 0) {
@@ -407,15 +412,21 @@ function chapterContext(root, dir, rel) {
     try {
       const raw = fs.readFileSync(path.join(bookDir, '正文', before.file), 'utf8')
       const body = raw.replace(/^#\s*[^\n]*\n?/, '').trim()
-      prev = { title: before.title, n: before.n, tail: body.slice(-520) }
+      prev = { title: before.title, n: before.n, chars: before.chars, tail: body.slice(-520), scope: '只取结尾 520 字' }
     } catch {
-      /* 读不到就算了 */
+      degraded.push('上一章读不到')
     }
+  } else if (index === 0) {
+    degraded.push('这是第一章，没有前情')
   }
 
   const issues = []
   const table = path.join(bookDir, '05_伏笔表.md')
-  if (n && fs.existsSync(table)) {
+  if (!n) {
+    degraded.push('定位不到章号（文件名里没有「第N章」）')
+  } else if (!fs.existsSync(table)) {
+    degraded.push('没有 05_伏笔表.md —— 这一章该埋什么、该收什么，取不到')
+  } else {
     const chapterOf = (cell) => {
       const m = String(cell || '').match(/第\s*(\d+)\s*章/)
       return m ? Number(m[1]) : 0
@@ -428,15 +439,28 @@ function chapterContext(root, dir, rel) {
         const no = cells[1]
         if (!/^\d+$/.test(no)) continue
         const name = cells[2]
-        if (chapterOf(cells[3]) === n) issues.push({ no: Number(no), name, kind: '埋', where: cells[3] })
-        if (chapterOf(cells[4]) === n) issues.push({ no: Number(no), name, kind: '收', where: cells[4] })
+        const buriedAt = chapterOf(cells[3])
+        const collectAt = chapterOf(cells[4])
+        if (buriedAt === n) {
+          issues.push({ no: Number(no), name, kind: '埋', where: cells[3], span: null })
+        }
+        if (collectAt === n) {
+          issues.push({
+            no: Number(no),
+            name,
+            kind: '收',
+            where: cells[4],
+            buriedAt: buriedAt || null,
+            span: buriedAt ? Math.max(0, n - buriedAt) : null,
+          })
+        }
       }
     } catch {
-      /* 表坏了就当没有 */
+      degraded.push('05_伏笔表.md 解析失败（表格格式变了？）')
     }
   }
 
-  return { n, prev, issues }
+  return { n, prev, issues, degraded }
 }
 
 
@@ -464,6 +488,157 @@ function writeState(root, patch) {
     /* 写不了就当没设过 */
   }
   return next
+}
+
+// ─── 全书体检 ───────────────────────────────────────────────
+// 学的 akira399/dsh-novel-writer 的 consistency 与 siweina/dsh-novel-writer 的 graph：
+// ① 人物缺席矩阵 —— 「人丢了」是可算的，不是凭感觉；
+// ② 正文时间标记归一（第三天 / 第3天）—— 后章比前章早就是倒挂。
+// 他们靠结构化账本，我们只有 md，所以从正文里抽，抽不到的记进 degraded。
+
+/** 中文数字 → 阿拉伯（支持 零一二两三四五六七八九十、十X、X十、X十Y）。抄自 akira399 的 cons-detect.ts。 */
+const CN_DIGITS = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+
+function chineseToNumber(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  if (/^\d+$/.test(raw)) return Number(raw)
+  if (!/^[零一二两三四五六七八九十]{1,3}$/.test(raw)) return null
+  if (raw.includes('十')) {
+    const [tensText = '', onesText = ''] = raw.split('十')
+    const tens = tensText === '' ? 1 : CN_DIGITS[tensText] ?? 0
+    const ones = onesText === '' ? 0 : CN_DIGITS[onesText] ?? 0
+    return tens * 10 + ones
+  }
+  return CN_DIGITS[raw] ?? null
+}
+
+// 02_人物.md 里 `## ` 开头的既有人物也有章节（次要角色 / 取名风格 / 角色关系…），
+// 这些不是人名。实测混进名单会让「人物出场」那栏多出四条假的。
+const NOT_A_PERSON = new Set([
+  '人物',
+  '主要角色',
+  '次要角色',
+  '角色关系',
+  '人物关系',
+  '取名风格',
+  '命名风格',
+  '设定',
+  '规则',
+  '附录',
+  '目录',
+  '索引',
+  '档案',
+  '备注',
+  '其他',
+])
+
+function parseCharacterNames(bookDir) {
+  const file = path.join(bookDir, '02_人物.md')
+  if (!fs.existsSync(file)) return { names: [], degraded: ['没有 02_人物.md —— 人物连续性查不了'] }
+  const names = []
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const hit = line.match(/^##\s+(.+)$/)
+      if (!hit) continue
+      const name = hit[1]
+        .replace(/[（(].*$/, '')
+        .replace(/^\d+[.、]\s*/, '')
+        .trim()
+      if (!name || NOT_A_PERSON.has(name) || /^(人物|目录|索引|附录|关系|档案|设定|规则)/.test(name)) continue
+      names.push(name)
+    }
+  } catch {
+    return { names: [], degraded: ['02_人物.md 读不动'] }
+  }
+  return { names: [...new Set(names)], degraded: [] }
+}
+
+function bookInsight(root, dir) {
+  const bookDir = path.join(root, dir)
+  const chapters = listChapters(bookDir)
+  const parsed = parseCharacterNames(bookDir)
+  const degraded = [...parsed.degraded]
+
+  // 每人每章在不在
+  const texts = chapters.map((c) => {
+    try {
+      return fs.readFileSync(path.join(bookDir, '正文', c.file), 'utf8')
+    } catch {
+      return ''
+    }
+  })
+  const rows = chapters.map((c, i) => ({
+    n: c.n,
+    title: c.title,
+    present: parsed.names.filter((name) => texts[i].includes(name)),
+  }))
+
+  // 连续缺席 ≥3 章（siweina 的默认阈值是 5，我们的书还短，先降一档）
+  const THRESHOLD = 3
+  const absences = []
+  for (const name of parsed.names) {
+    let startIndex = null
+    for (let i = 0; i <= rows.length; i += 1) {
+      const here = i < rows.length && rows[i].present.includes(name)
+      if (!here && startIndex === null) startIndex = i
+      if (here && startIndex !== null) {
+        const length = i - startIndex
+        if (length >= THRESHOLD) {
+          absences.push({ name, from: rows[startIndex].n, to: rows[i - 1].n, length })
+        }
+        startIndex = null
+      }
+    }
+  }
+
+  // 正文里的「第 N 天」
+  // 正文里的「第 N 天」。一章可能提好几个（回忆里的"第一天"），
+  // 取**最后一个**当章末时间 —— 取第一个会撞上开头的回溯。
+  const timeline = []
+  const noTime = []
+  for (let i = 0; i < chapters.length; i += 1) {
+    const all = [...texts[i].matchAll(/第\s*([0-9零一二两三四五六七八九十]{1,3})\s*天/g)]
+    if (all.length === 0) {
+      noTime.push(chapters[i].n)
+      continue
+    }
+    const day = chineseToNumber(all[all.length - 1][1])
+    if (day === null) {
+      noTime.push(chapters[i].n)
+      continue
+    }
+    timeline.push({ n: chapters[i].n, day })
+  }
+  const timeIssues = []
+  for (let i = 1; i < timeline.length; i += 1) {
+    if (timeline[i].day < timeline[i - 1].day) {
+      timeIssues.push({
+        n: timeline[i].n,
+        day: timeline[i].day,
+        prevN: timeline[i - 1].n,
+        prevDay: timeline[i - 1].day,
+      })
+    }
+  }
+  if (timeline.length === 0) degraded.push('正文里没找到「第 N 天」—— 时间线查不了')
+  else if (noTime.length > 0) degraded.push(`第 ${noTime.join('、')} 章正文里没有「第 N 天」`)
+
+  return {
+    characters: parsed.names,
+    rows,
+    absences,
+    timeline,
+    timeIssues,
+    degraded,
+    // 一页能看完的摘要
+    summary: {
+      chapters: chapters.length,
+      characters: parsed.names.length,
+      absentWarnings: absences.length,
+      timeWarnings: timeIssues.length,
+    },
+  }
 }
 
 export function apply(ctx, config) {
@@ -535,6 +710,10 @@ export function apply(ctx, config) {
         if (route === '/context') {
           if (!isPlainName(dir) || !rel) throw Object.assign(new Error('缺少参数'), { status: 400 })
           return json(res, 200, chapterContext(root, dir, rel))
+        }
+        if (route === '/insight') {
+          if (!isPlainName(dir)) throw Object.assign(new Error('缺少书名'), { status: 400 })
+          return json(res, 200, bookInsight(root, dir))
         }
         throw Object.assign(new Error('没有这个接口'), { status: 404 })
       }
