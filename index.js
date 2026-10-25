@@ -530,6 +530,24 @@ function outlinePosition(bookDir, n) {
   }
 }
 
+/** 写书经验卡的索引：只给文件名和症状行，不贴正文 —— 18 张全贴进来太贵。 */
+function writingNotes(root) {
+  const dir = notesDir(root)
+  if (!fs.existsSync(dir)) return []
+  const out = []
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.startsWith('写书-') || !name.endsWith('.md')) continue
+    try {
+      const head = fs.readFileSync(path.join(dir, name), 'utf8').split('\n').slice(0, 8).join('\n')
+      const hit = head.match(/^\s*>\s*\*\*症状\*\*[：:]\s*(.+)$/m)
+      out.push({ file: name, trigger: (hit ? hit[1] : name.replace(/\.md$/, '')).slice(0, 50) })
+    } catch {
+      /* 读不动就跳过 */
+    }
+  }
+  return out
+}
+
 function bookBrief(root, dir, n) {
   const bookDir = path.join(root, dir)
   const chapters = listChapters(bookDir)
@@ -537,6 +555,7 @@ function bookBrief(root, dir, n) {
   const wanted = chapters.find((c) => c.n === Number(n)) || chapters[chapters.length - 1]
   const ctx = chapterContext(root, dir, wanted.path)
   const outline = outlinePosition(bookDir, wanted.n)
+  const notes = writingNotes(root)
   const state = readState(root)
   const now = Date.now()
   const briefs = (typeof state.briefCount === 'number' ? state.briefCount : 0) + 1
@@ -568,6 +587,7 @@ function bookBrief(root, dir, n) {
     fullReadFiles: adviseFullRead
       ? ['01_世界观.md', '02_人物.md', '03_写作手册.md', '07_时间线.md', '08_写作检查表.md']
       : [],
+    notes,
   }
 }
 
@@ -730,12 +750,44 @@ function bookInsight(root, dir) {
   if (timeline.length === 0) degraded.push('正文里没找到「第 N 天」—— 时间线查不了')
   else if (noTime.length > 0) degraded.push(`第 ${noTime.join('、')} 章正文里没有「第 N 天」`)
 
+  // 主语重复：每章的「他」密度 + 最长连击。
+  // 实测第一版 4000 字里有 174 个「他」、33% 的句子以「他」开头 —— 读者到第四个
+  // 就不再看见主语了。正常区间大约每千字 15–25 次、句首占比 20% 以下。
+  const subjects = chapters.map((c, i) => {
+    const text = texts[i].replace(/^#.*$/m, '')
+    const han = (text.match(/[\u4e00-\u9fff]/g) || []).length
+    const ta = (text.match(/他/g) || []).length
+    const sents = text
+      .split(/(?<=[。！？…])/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 1)
+    const starts = sents.filter((s) => /^他/.test(s)).length
+    let run = 0
+    let maxRun = 0
+    for (const s of sents) {
+      if (/^他/.test(s)) {
+        run += 1
+        maxRun = Math.max(maxRun, run)
+      } else {
+        run = 0
+      }
+    }
+    return {
+      n: c.n,
+      per1000: han ? Math.round((ta / han) * 1000 * 10) / 10 : 0,
+      startRatio: sents.length ? Math.round((starts / sents.length) * 100) : 0,
+      maxRun,
+      over: han ? ta / han > 0.035 || starts / sents.length > 0.3 : false,
+    }
+  })
+
   return {
     characters: parsed.names,
     rows,
     absences,
     timeline,
     timeIssues,
+    subjects,
     degraded,
     // 一页能看完的摘要
     summary: {
@@ -743,6 +795,7 @@ function bookInsight(root, dir) {
       characters: parsed.names.length,
       absentWarnings: absences.length,
       timeWarnings: timeIssues.length,
+      subjectWarnings: subjects.filter((s) => s.over).length,
     },
   }
 }
@@ -954,6 +1007,12 @@ export function apply(ctx, config) {
               info.adviseFullRead
                 ? `⚠️ 该重读设定（${info.reason || '到点了'}）：${info.fullReadFiles.join('、')}`
                 : '不用重读全书设定，这次只取轻材料',
+              info.notes && info.notes.length
+                ? `经验卡 ${info.notes.length} 张（工作区 procedures/ 里的 写书-*.md）—— 动笔前按症状搜一遍，命中哪张读哪张：${info.notes
+                    .slice(0, 6)
+                    .map((n) => n.trigger)
+                    .join(' / ')}${info.notes.length > 6 ? ' ……' : ''}`
+                : '',
               info.degraded.length ? `缺口：${info.degraded.join('；')}` : '',
             ]
               .filter(Boolean)
