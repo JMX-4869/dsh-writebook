@@ -790,6 +790,7 @@ window.__ModuleLoader__.load({
       const [noteText, setNoteText] = useState('')
       const [msg, setMsg] = useState('')
       const [savedAt, setSavedAt] = useState('')
+      const [blocked, setBlocked] = useState(false)
       const [ctx, setCtx] = useState(null)
 
       // 边写边记：一行就够，带上书名和章名，落在 procedures/_inbox.md。
@@ -817,6 +818,7 @@ window.__ModuleLoader__.load({
           setFile(data)
           setDraft(data.raw)
           setEditing(false)
+          setBlocked(false)
         } catch (error) {
           setErr(error.message)
         }
@@ -843,8 +845,9 @@ window.__ModuleLoader__.load({
       }, [dir, rel])
 
       // 默认一直保存：编辑态空闲 1.2 秒就落盘，手动「保存」只是立刻做同一件事。
+      // 撞上 409（磁盘上被改过）就**停掉自动保存**，否则每 1.2 秒重试一次、只刷错误。
       const save = async (auto) => {
-        if (!file || busy) return
+        if (!file || busy || blocked) return
         if (file.raw === draft) {
           if (!auto) setEditing(false)
           return
@@ -863,18 +866,19 @@ window.__ModuleLoader__.load({
           if (onChanged) onChanged()
         } catch (error) {
           setErr(error.message)
+          if (error.status === 409) setBlocked(true)
         } finally {
           if (!auto) setBusy(false)
         }
       }
 
       useEffect(() => {
-        if (!editing || !file || draft === file.raw) return undefined
+        if (blocked || !editing || !file || draft === file.raw) return undefined
         const timer = window.setTimeout(() => {
           save(true)
         }, 1200)
         return () => window.clearTimeout(timer)
-      }, [draft, editing, file])
+      }, [draft, editing, file, blocked])
 
       const body = file ? file.raw.replace(/^#\s*[^\n]*\n?/, '') : ''
       const isSetting = !rel.startsWith('正文/')

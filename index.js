@@ -164,10 +164,18 @@ function bookDetail(root, dir) {
   }
 }
 
+/** 点开头的目录/文件（.backups、.writebook.json）不是正文，面板不给开读写。 */
+function assertReadableRel(rel) {
+  if (/(^|[\\/])\./.test(String(rel || ''))) {
+    throw Object.assign(new Error('隐藏目录不开放读写'), { status: 400 })
+  }
+}
+
 function readFile(root, dir, rel) {
   const bookDir = path.join(root, dir)
   const abs = inside(bookDir, rel)
   if (!abs) throw Object.assign(new Error('路径越界'), { status: 400 })
+  assertReadableRel(rel)
   let raw
   try {
     raw = fs.readFileSync(abs, 'utf8')
@@ -229,6 +237,7 @@ function writeFile(root, dir, rel, raw, expectedMtime) {
   const bookDir = path.join(root, dir)
   const abs = inside(bookDir, rel)
   if (!abs) throw Object.assign(new Error('路径越界'), { status: 400 })
+  assertReadableRel(rel)
   if (typeof raw !== 'string') throw Object.assign(new Error('缺少内容'), { status: 400 })
   let mtime = 0
   let before = ''
@@ -265,7 +274,9 @@ function newChapter(root, dir, title, n) {
   fs.mkdirSync(textDir, { recursive: true })
   const chapters = listChapters(bookDir)
   const no = Number.isFinite(n) && n > 0 ? n : chapters.reduce((max, c) => Math.max(max, c.n), 0) + 1
-  const clean = String(title || '').replace(/[\\/:*?"<>|]/g, '').trim() || '未命名'
+  // 空标题不许建 —— 否则误点一下就在正文里留一个「第004章_未命名.md」。
+  const clean = String(title || '').replace(/[\\/:*?"<>|]/g, '').trim()
+  if (!clean) throw Object.assign(new Error('给这一章起个名字再建'), { status: 400 })
   const file = `第${String(no).padStart(3, '0')}章_${clean}.md`
   const abs = path.join(textDir, file)
   if (fs.existsSync(abs)) throw Object.assign(new Error(`已经有这一章：${file}`), { status: 409 })
@@ -422,6 +433,11 @@ function chapterContext(root, dir, rel) {
 
   const issues = []
   const table = path.join(bookDir, '05_伏笔表.md')
+  const isChapter = String(rel).startsWith('正文/')
+  if (!isChapter) {
+    // 设定文件本来就没有章号，别按章节报「定位不到章号」——那是误报。
+    return { n: 0, prev: null, issues: [], degraded: [], isSetting: true }
+  }
   if (!n) {
     degraded.push('定位不到章号（文件名里没有「第N章」）')
   } else if (!fs.existsSync(table)) {
