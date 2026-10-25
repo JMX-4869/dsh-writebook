@@ -31,6 +31,13 @@ const MAX_BODY = 16 * 1024 * 1024
 /** 字数：只数汉字（和 tools/写书 一致）。 */
 const han = (s) => (s.match(/[\u4e00-\u9fff]/g) || []).length
 
+/**
+ * 按行解析用的读文件：把 CRLF 统一成 LF。
+ * 编辑器把设定存成 CRLF 时，`/^##\s+(.+)$/` 一行都匹配不上（`.` 不吃 `\r`），
+ * 结果人物表解析出 0 个名字、伏笔表对不上号 —— 只影响解析，**不回写文件**。
+ */
+const readText = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n')
+
 const isPlainName = (n) =>
   typeof n === 'string' && n.length > 0 && n.length < 120 && !/[\\/]/.test(n) && n !== '.' && n !== '..'
 
@@ -329,7 +336,7 @@ function listNotes(root) {
     const abs = path.join(dir, name)
     let text = ''
     try {
-      text = fs.readFileSync(abs, 'utf8')
+      text = readText(abs)
     } catch {
       continue
     }
@@ -421,7 +428,7 @@ function chapterContext(root, dir, rel) {
   if (index > 0) {
     const before = chapters[index - 1]
     try {
-      const raw = fs.readFileSync(path.join(bookDir, '正文', before.file), 'utf8')
+      const raw = readText(path.join(bookDir, '正文', before.file))
       const body = raw.replace(/^#\s*[^\n]*\n?/, '').trim()
       prev = { title: before.title, n: before.n, chars: before.chars, tail: body.slice(-520), scope: '只取结尾 520 字' }
     } catch {
@@ -448,7 +455,7 @@ function chapterContext(root, dir, rel) {
       return m ? Number(m[1]) : 0
     }
     try {
-      for (const line of fs.readFileSync(table, 'utf8').split('\n')) {
+      for (const line of readText(table).split('\n')) {
         if (!line.trim().startsWith('|')) continue
         const cells = line.split('|').map((s) => s.trim())
         if (cells.length < 6) continue
@@ -498,7 +505,7 @@ function outlinePosition(bookDir, n) {
   if (!fs.existsSync(file)) return null
   let text
   try {
-    text = fs.readFileSync(file, 'utf8')
+    text = readText(file)
   } catch {
     return null
   }
@@ -538,7 +545,7 @@ function writingNotes(root) {
   for (const name of fs.readdirSync(dir)) {
     if (!name.startsWith('写书-') || !name.endsWith('.md')) continue
     try {
-      const head = fs.readFileSync(path.join(dir, name), 'utf8').split('\n').slice(0, 8).join('\n')
+      const head = readText(path.join(dir, name)).split('\n').slice(0, 8).join('\n')
       const hit = head.match(/^\s*>\s*\*\*症状\*\*[：:]\s*(.+)$/m)
       out.push({ file: name, trigger: (hit ? hit[1] : name.replace(/\.md$/, '')).slice(0, 50) })
     } catch {
@@ -556,6 +563,22 @@ function bookBrief(root, dir, n) {
   const ctx = chapterContext(root, dir, wanted.path)
   const outline = outlinePosition(bookDir, wanted.n)
   const notes = writingNotes(root)
+  // 上一章的语言质感 —— 写新章前对着看一眼，风格才接得上。
+  let prevStyle = null
+  let prevName = null
+  const idx = chapters.findIndex((c) => c.n === wanted.n)
+  const prevChapter = idx > 0 ? chapters[idx - 1] : null
+  if (prevChapter) {
+    try {
+      prevStyle = chapterStyle(
+        readText(path.join(bookDir, '正文', prevChapter.file)),
+        parseCharacterNames(bookDir).names,
+      )
+      prevName = prevChapter.title || `第 ${prevChapter.n} 章`
+    } catch {
+      prevStyle = null
+    }
+  }
   const state = readState(root)
   const now = Date.now()
   const briefs = (typeof state.briefCount === 'number' ? state.briefCount : 0) + 1
@@ -571,6 +594,8 @@ function bookBrief(root, dir, n) {
     book: dir,
     chapter: { n: wanted.n, title: wanted.title, chars: wanted.chars },
     prev: ctx.prev,
+    prevStyle,
+    prevName,
     issues: ctx.issues,
     outline,
     degraded: ctx.degraded,
@@ -649,6 +674,7 @@ const NOT_A_PERSON = new Set([
   '人物关系',
   '取名风格',
   '命名风格',
+  '原型',
   '设定',
   '规则',
   '附录',
@@ -664,20 +690,46 @@ function parseCharacterNames(bookDir) {
   if (!fs.existsSync(file)) return { names: [], degraded: ['没有 02_人物.md —— 人物连续性查不了'] }
   const names = []
   try {
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    for (const line of readText(file).split('\n')) {
       const hit = line.match(/^##\s+(.+)$/)
       if (!hit) continue
       const name = hit[1]
         .replace(/[（(].*$/, '')
-        .replace(/^\d+[.、]\s*/, '')
+        .replace(/^(?:\d+|[一二三四五六七八九十]+)[.、]\s*/, '')
         .trim()
-      if (!name || NOT_A_PERSON.has(name) || /^(人物|目录|索引|附录|关系|档案|设定|规则)/.test(name)) continue
+      // 人名 2–4 字：「顾拟」「苏满」「半步仙」。更长的多半是小节标题（「顾拟这个人」），不是人。
+      if (!name || name.length < 2 || name.length > 4) continue
+      if (NOT_A_PERSON.has(name) || /^(人物|目录|索引|附录|关系|档案|设定|规则)/.test(name)) continue
       names.push(name)
     }
   } catch {
     return { names: [], degraded: ['02_人物.md 读不动'] }
   }
   return { names: [...new Set(names)], degraded: [] }
+}
+
+/** 一章的语言质感指标。只报数 —— 短句可以是风格，但这些数一起看能说明"碎不碎"。 */
+function chapterStyle(raw, names = []) {
+  const text = String(raw || '').replace(/^#.*$/m, '')
+  const han = (text.match(/[\u4e00-\u9fff]/g) || []).length
+  const paras = text.split(/\n+/).map((p) => p.trim()).filter(Boolean)
+  const paraLens = paras.map((p) => (p.match(/[\u4e00-\u9fff]/g) || []).length)
+  const ju = (text.match(/。/g) || []).length
+  const sents = text.split(/(?<=[。！？…])/).map((s) => s.trim()).filter((s) => s.length > 1)
+  const startsName = names.length ? paras.filter((p) => names.some((name) => p.startsWith(name))).length : -1
+  const smell = (text.match(/闻|鼻子|腥|臭|香|馊|霉|气味|烟味|糊味|土腥/g) || []).length
+  const juPer1000 = han ? Math.round((ju / han) * 1000 * 10) / 10 : 0
+  const avgSentLen = sents.length ? Math.round((han / sents.length) * 10) / 10 : 0
+  const nameStartRatio = startsName < 0 || !paras.length ? -1 : Math.round((startsName / paras.length) * 100)
+  const maxPara = paraLens.length ? Math.max(...paraLens) : 0
+  const smellPer1000 = han ? Math.round((smell / han) * 1000 * 10) / 10 : 0
+  const flags = []
+  if (juPer1000 > 50) flags.push(`句号密（${juPer1000}/千字，常见 20–40）`)
+  if (avgSentLen > 0 && avgSentLen < 18) flags.push(`句短（平均 ${avgSentLen} 字）`)
+  if (nameStartRatio > 15) flags.push(`段首人名多（${nameStartRatio}%）`)
+  if (maxPara > 0 && maxPara < 200) flags.push(`没有长段（最长 ${maxPara} 字）`)
+  if (han > 500 && smellPer1000 < 0.3) flags.push(`嗅觉几乎没有（${smell} 次）`)
+  return { chars: han, juPer1000, avgSentLen, nameStartRatio, maxPara, smell, smellPer1000, flags }
 }
 
 function bookInsight(root, dir) {
@@ -689,7 +741,7 @@ function bookInsight(root, dir) {
   // 每人每章在不在
   const texts = chapters.map((c) => {
     try {
-      return fs.readFileSync(path.join(bookDir, '正文', c.file), 'utf8')
+      return readText(path.join(bookDir, '正文', c.file))
     } catch {
       return ''
     }
@@ -781,6 +833,11 @@ function bookInsight(root, dir) {
     }
   })
 
+  // 语言质感：句号密度 / 平均句长 / 段首人名 / 最长段 / 嗅觉次数。
+  // 只报数，不判对错 —— 短句是风格，但"每千字 60 个句号 + 最长段 161 字 +
+  // 段首人名 26%"这三条同时成立时，读起来就是一页碎渣。基线放在数字旁边，自己比。
+  const style = chapters.map((c, i) => ({ n: c.n, ...chapterStyle(texts[i], parsed.names) }))
+
   return {
     characters: parsed.names,
     rows,
@@ -788,6 +845,7 @@ function bookInsight(root, dir) {
     timeline,
     timeIssues,
     subjects,
+    style,
     degraded,
     // 一页能看完的摘要
     summary: {
@@ -796,6 +854,7 @@ function bookInsight(root, dir) {
       absentWarnings: absences.length,
       timeWarnings: timeIssues.length,
       subjectWarnings: subjects.filter((s) => s.over).length,
+      styleWarnings: style.filter((s) => s.flags.length).length,
     },
   }
 }
@@ -995,6 +1054,10 @@ export function apply(ctx, config) {
                 ? `第 ${info.since.briefs} 次开工取材料`
                 : `第 ${info.since.briefs} 次开工 · 距上次 ${info.since.hours} 小时 · 期间写了 ${info.since.chaptersSince ?? 0} 章`,
               info.prev ? `前情：${info.prev.title}，结尾 ${info.prev.tail.slice(-80)}` : '没有前一章',
+              info.prevStyle
+                ? `上一章语言（${info.prevName}）：句号 ${info.prevStyle.juPer1000}/千字 · 每句 ${info.prevStyle.avgSentLen} 字 · 段首人名 ${info.prevStyle.nameStartRatio}% · 最长段 ${info.prevStyle.maxPara} 字 · 嗅觉 ${info.prevStyle.smell} 次` +
+                  (info.prevStyle.flags.length ? `　⚠️ ${info.prevStyle.flags.join('；')}` : '')
+                : '',
               info.outline && info.outline.reached
                 ? `进度：已到「${info.outline.reached}」（${info.outline.reachedRange}）` +
                   (info.outline.next ? ` · 下一个跃升点：第 ${info.outline.nextAt} 章「${info.outline.next}」` : '')
