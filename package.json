@@ -1,6 +1,6 @@
 {
   "name": "@local/writebook",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "写书：books/ 目录的书架、目录、正文读写，做成侧边栏里的一个面板。",
   "type": "module",
